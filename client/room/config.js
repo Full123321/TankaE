@@ -82,10 +82,10 @@ const config = {
         playerTeleported: "Телепортация на координаты {coords}",
         accessDenied: "У вас нет доступа к этой зоне.",
         statusRequired: "Для входа требуется статус '{statusName}'.",
-        hintMessage: "Привет, как дела?", // Для hint зон
+        hintMessage: ".", // Для hint зон
         serverStartTime: "Сервер работает: {time}",
         gamemodeTitle: "{gamemodeName}",
-        helpCommand: "Доступные команды: /tp, /pop, /spawn, /adm, /ban, /transfer, /help",
+        helpCommand: "Доступные команды: /tp, /pop, /spawn, /adm, /ban, /transfer, /help дальше-больше!",
         transferHelp: "Использование: /transfer [ID игрока] [сумма]",
         transferSuccess: "Вы перевели {amount} монет игроку {playerName}.",
         transferNotEnoughFunds: "Недостаточно средств для перевода.",

@@ -1,10 +1,19 @@
 {
-  "name": "Тян отдыхает",
+  "name": "тян отдыхает",
+  "description": "окак.",
   "version": "1.0.0",
-  "author": "Тяночка",
-  "description": "ебать вы все дауны.",
-  "max_players": 32,
-  "gamemode_script": "gamemode.js",
-  "options_script": "options.js",
-  "teams_script": "default_teams.js"
+  "author": "ƬяⒽ0чℜa❣︎",
+  "gamemode": "custom",
+  "files": [
+    "options.js",
+    "default_teams.js",
+    "gamemode.js",
+    "config.js",
+    "zones.js",
+    "commands.js",
+    "admin.js",
+    "ui.js",
+    "utils.js",
+    "player_manager.js"
+  ]
 }

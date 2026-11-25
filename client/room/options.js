@@ -1,16 +1,18 @@
 // options.js
-module.exports = {
-  round_time: 999999,      // бесконечный раунд
-  round_end_time: 999999,  // без паузы между раундами
-  respawn_time: 3,
-  friendly_fire: false,
 
-  // Спавн
-  spawn_pos: { x: 0, y: 1, z: 0 },
+const options = {
+    // Общие настройки режима
+    gamemodeName: "Режим от Тяночки!",
+    rainbowColorInterval: 20, // Интервал смены цвета радуги в секундах
 
-  // Первому игроку — админ
-  first_player_is_admin: true,
+    // Настройки времени игры
+    maxGameTime: 0, // 0 = бесконечное время
+    startTimeDisplay: true, // Показывать ли время с начала сервера
 
-  // Ключ-модификатор для открытия меню
-  menu_key: "E",
+    // Настройки админки
+    firstPlayerIsAdmin: true,
+
+    // Другие настройки, если потребуются
 };
+
+module.exports = options;

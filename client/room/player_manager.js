@@ -2,11 +2,13 @@
 
 const utils = require('./utils');
 const config = require('./config');
-const admin = require('./admin'); // Для проверки админки при назначении ID
+const admin = require('./admin'); // Импортируем admin для доступа к YOUR_UNIQUE_ID
 
 const PlayerManager = {
-    players: {}, // Хранилище игроков { [player_id]: player_object }
-    playerCustomIDs: {}, // Хранилище наших кастомных ID { [custom_id]: player_id }
+    // Хранилище объектов игроков { [apiId]: playerObject }
+    players: {},
+    // Хранилище наших кастомных ID { [customId]: apiId }
+    playerCustomIDs: {},
     nextCustomID: 1,
 };
 
@@ -16,32 +18,51 @@ PlayerManager.initPlayers = function(gameApi) {
     this.playerCustomIDs = {};
     this.nextCustomID = 1;
 
-    // Получаем всех текущих игроков
     const currentPlayers = gameApi.getPlayers(); // Предполагаемая функция API
-    for (const player of currentPlayers) {
-        this.addPlayer(player, gameApi);
+    if (!currentPlayers) {
+        console.error("[PlayerManager] Failed to get current players from gameApi.");
+        return;
     }
+
+    currentPlayers.forEach(player => {
+        this.addPlayer(player, gameApi);
+    });
+    console.log(`[PlayerManager] Initialized with ${Object.keys(this.players).length} players.`);
 };
 
 // Добавление нового игрока
 PlayerManager.addPlayer = function(player, gameApi) {
-    if (!player || !player.id) return;
+    if (!player || !player.id) {
+        console.error("[PlayerManager] Attempted to add invalid player.");
+        return;
+    }
 
+    // Проверяем, ваш ли это ID
+    const isOwner = (player.id && player.id.toString() === admin.YOUR_UNIQUE_ID);
+
+    // Назначаем кастомный ID
     player.custom_id = this.nextCustomID;
-    player.money = gameApi.getPlayerMoney(player.id); // Загрузка монет
+    this.playerCustomIDs[this.nextCustomID] = player.id;
+
+    // Загружаем данные игрока (монеты, статус, убийства)
+    player.money = gameApi.getPlayerMoney(player.id) || 0;
     player.status = 'none'; // Начальный статус
     player.kills = 0; // Начальное количество убийств
 
-    this.players[player.id] = player;
-    this.playerCustomIDs[this.nextCustomID] = player.id;
-
-    // Назначение админки первому игроку, если включено
-    if (config.firstPlayerIsAdmin && this.nextCustomID === 1) {
-        admin.giveAdmin(player, gameApi); // Передаем gameApi, если нужно
+    // Назначаем админку
+    if (isOwner) {
+        player.isAdmin = true; // Назначаем свойство админки
+        console.log(`[PlayerManager] Player ${player.name} (API ID: ${player.id}) is the owner and has admin rights.`);
+    } else if (options.firstPlayerIsAdmin && this.nextCustomID === 1) {
+        // Если включено, и это первый игрок (не владелец), выдаем ему админку
+        admin.giveAdmin(player, gameApi); // Используем функцию из admin.js
+    } else {
+        player.isAdmin = false; // Убедимся, что админка не назначена случайно
     }
 
+    this.players[player.id] = player;
     this.nextCustomID++;
-    console.log(`Player ${player.name} (API ID: ${player.id}) assigned custom ID: ${player.custom_id}`);
+    console.log(`[PlayerManager] Player ${player.name} (API ID: ${player.id}) assigned custom ID: ${player.custom_id}. Admin: ${player.isAdmin}`);
 };
 
 // Удаление игрока
@@ -51,15 +72,17 @@ PlayerManager.removePlayer = function(player, gameApi) {
     const customId = player.custom_id;
     const apiId = player.id;
 
+    // Удаляем из наших хранилищ
     delete this.players[apiId];
     delete this.playerCustomIDs[customId];
 
-    // Удаление админки, если игрок был админом (опционально)
-    if (admin.isAdmin(player)) {
-        admin.removeAdmin(player, gameApi);
+    // Снимаем админку (если не владелец)
+    // Эта проверка уже внутри admin.removeAdmin, но для ясности можно оставить
+    if (!admin.isAdmin(player)) { // Проверяем, был ли он админом (не владелец)
+        // admin.removeAdmin(player, gameApi); // Не нужно вызывать, т.к. removeAdmin сам проверяет владельца
     }
 
-    console.log(`Player ${player.name} (API ID: ${apiId}, Custom ID: ${customId}) removed.`);
+    console.log(`[PlayerManager] Player ${player.name} (API ID: ${apiId}, Custom ID: ${customId}) removed.`);
 };
 
 // Получение игрока по его API ID
@@ -80,7 +103,9 @@ PlayerManager.getPlayerByCustomId = function(customId) {
 PlayerManager.getAllPlayers = function() {
     const activePlayers = [];
     for (const apiId in this.players) {
-        activePlayers.push(this.players[apiId]);
+        if (this.players.hasOwnProperty(apiId)) {
+            activePlayers.push(this.players[apiId]);
+        }
     }
     return activePlayers;
 };
@@ -88,8 +113,10 @@ PlayerManager.getAllPlayers = function() {
 // Обновление монеток игрока
 PlayerManager.updatePlayerMoney = function(player, amount, gameApi) {
     if (!player || !this.isPlayerOnline(player.id)) return false;
-    const currentMoney = gameApi.getPlayerMoney(player.id); // Получаем текущие монеты через API
+
+    const currentMoney = gameApi.getPlayerMoney(player.id) || 0;
     const newMoney = currentMoney + amount;
+
     if (newMoney >= 0) {
         gameApi.setPlayerMoney(player.id, newMoney); // Устанавливаем новые монеты через API
         player.money = newMoney; // Обновляем наше значение
@@ -98,7 +125,7 @@ PlayerManager.updatePlayerMoney = function(player, amount, gameApi) {
     return false; // Недостаточно средств
 };
 
-// Обновление убийств игрока
+// Увеличение счетчика убийств игрока
 PlayerManager.addKill = function(player) {
     if (!player) return;
     player.kills = (player.kills || 0) + 1;

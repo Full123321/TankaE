@@ -1,151 +1,498 @@
-// gamemode.js
-const API = require("pixel-combats-api"); // см. официальный API
+let players = {}; // Хранилище данных игроков: { uuid: { player, roomId, nickname, coins, isAdmin, alive, isFlying, status, ownedStatuses, ... }, ... }
+let pendingPayment = null; // { from: playerData, to: playerData, amount: number }
 
-// ============ ХРАНИЛИЩЕ ============
+// --- Функции для работы с данными игроков ---
 
-const state = {
-  serverStart: Date.now(),
-  players: new Map(),   // roomId -> playerData
-  nextId: 1,
-  rainbowIndex: 0,
-  hintToggle: false,
+function getPlayerDataByUuid(uuid) {
+  return players[uuid];
+}
+
+function getPlayerDataById(id) {
+  for (const uuid in players) {
+    if (players[uuid].roomId == id) {
+      return players[uuid];
+    }
+  }
+  return null;
+}
+
+function getPlayerDataByName(name) {
+  for (const uuid in players) {
+    if (players[uuid].nickname.toLowerCase() === name.toLowerCase()) {
+      return players[uuid];
+    }
+  }
+  return null;
+}
+
+function updatePlayerHud(player) {
+  if (!player) return;
+  const playerData = getPlayerDataByUuid(player.uuid);
+  if (!playerData || !playerData.alive) return;
+
+  const health = API.getHealth(player);
+  const maxHealth = 100;
+  const armor = API.getArmor(player);
+  const maxArmor = 100;
+
+  let hudText = `\n<color=#77DD77>HP: ${health}/${maxHealth}</color> | <color=#FFD700>ARM: ${armor}/${maxArmor}</color>`;
+  hudText += `\n<color=#ADD8E6>Coins: ${playerData.coins}</color>`;
+  if (playerData.status && playerData.status.name) {
+    hudText += ` | <color=${playerData.status.color}>${playerData.status.name}</color>`;
+  }
+
+  API.setTopLeft(player, hudText);
+}
+
+function updateScoreboard() {
+  const sortedPlayers = Object.values(players)
+    .filter(pData => pData.alive)
+    .sort((a, b) => b.coins - a.coins);
+
+  let scoreboardText = "<b>--- ЛИДЕРЫ ---</b>\n";
+  sortedPlayers.slice(0, 10).forEach((pData, index) => {
+    scoreboardText += `${index + 1}. ${pData.nickname} (${pData.coins})\n`;
+  });
+
+  API.getAllPlayers().forEach(p => {
+    const pData = getPlayerDataByUuid(p.uuid);
+    if (pData && pData.alive) {
+      API.setScoreboard(p, scoreboardText);
+    }
+  });
+}
+
+function updatePlayer(player, playerData) {
+  playerData.player = player;
+  playerData.roomId = player.id;
+  playerData.nickname = player.name;
+  playerData.alive = player.isConnected && API.isPlayerAlive(player); // Проверяем, что игрок подключен и жив
+  playerData.isFlying = API.isPlayerFlying(player);
+  updatePlayerHud(player);
+}
+
+function setPlayerStatus(playerData, statusName, statusColor) {
+  playerData.status = { name: statusName, color: statusColor };
+  if (!playerData.ownedStatuses.includes(statusName)) {
+    playerData.ownedStatuses.push(statusName);
+  }
+  updatePlayerHud(playerData.player);
+}
+
+function grantAdminPrivileges(player, playerData) {
+  playerData.isAdmin = true;
+  API.setPlayerTeam(player, API.getTeamByName("Admin")); // Предполагается, что есть команда "Admin"
+  player.showHint("Вам выданы права администратора.");
+}
+
+function revokeAdminPrivileges(player, playerData) {
+  playerData.isAdmin = false;
+  API.setPlayerTeam(player, API.getTeamByName("Default")); // Предполагается, что есть команда "Default"
+  if (playerData.isFlying) {
+    API.setFlight(player, false);
+    playerData.isFlying = false;
+  }
+  player.showHint("У вас отобраны права администратора.");
+}
+
+// --- Обработчики событий API ---
+
+API.onPlayerJoin = (player) => {
+  const uuid = player.uuid;
+  if (!players[uuid]) {
+    players[uuid] = {
+      uuid: uuid,
+      player: player,
+      roomId: player.id,
+      nickname: player.name,
+      coins: 100, // Начальное количество монет
+      isAdmin: false,
+      alive: true,
+      isFlying: false,
+      status: { name: null, color: null },
+      ownedStatuses: [],
+    };
+  } else {
+    // Игрок вернулся, восстанавливаем данные
+    players[uuid].player = player;
+    players[uuid].roomId = player.id;
+    players[uuid].nickname = player.name;
+    players[uuid].alive = true;
+    players[uuid].isFlying = API.isPlayerFlying(player);
+  }
+
+  const playerData = players[uuid];
+  setupPlayerHud(player, playerData);
+  updatePlayerHud(player);
+  updateScoreboard();
+
+  // Если игрок присоединился, и мы хотим, чтобы он снова стал админом, если был
+  // if (playerData.isAdmin) {
+  //   grantAdminPrivileges(player, playerData);
+  // }
 };
 
-const RAINBOW = ["#FF0000","#FF7F00","#FFFF00","#00FF00","#00BFFF","#4B0082","#8B00FF"];
+API.onPlayerLeave = (player) => {
+  const playerData = getPlayerDataByUuid(player.uuid);
+  if (playerData) {
+    playerData.alive = false;
+    playerData.player = null; // Очищаем ссылку на объект игрока
+    // Не удаляем данные игрока, чтобы сохранить прогресс
+  }
+  updateScoreboard();
+};
 
-// ============ УТИЛИТЫ ============
+API.onPlayerSpawn = (player) => {
+  const playerData = getPlayerDataByUuid(player.uuid);
+  if (playerData) {
+    playerData.alive = true;
+    playerData.isFlying = false; // Сбрасываем полет при спавне
+    API.setFlight(player, false);
+    updatePlayerHud(player);
+    updateScoreboard();
+  }
+};
 
-function getPlayerById(roomId) {
-  return [...state.players.values()].find(p => p.roomId === roomId && p.alive);
-}
+API.onPlayerDamage = (player, attacker, damage, type) => {
+  const playerData = getPlayerDataByUuid(player.uuid);
+  if (playerData && !playerData.alive) return; // Игрок уже мертв
 
-function getPlayerData(player) {
-  return [...state.players.values()].find(p => p.uuid === player.uuid);
-}
+  if (!attacker) { // Смерть от окружения
+    if (playerData) {
+      playerData.alive = false;
+      API.setHealth(player, 0); // Убедимся, что он мертв
+      // Не обновляем HUD, так как игрок мертв
+    }
+  }
+};
 
-function parseCoords(str) {
-  const [x, y, z] = str.split("@").map(Number);
-  return { x, y, z };
-}
+API.onPlayerChat = (player, message) => {
+  const playerData = getPlayerDataByUuid(player.uuid);
+  if (!playerData || !playerData.alive) return false; // Игнорируем мертвых
 
-function fmtTime(ms) {
-  const s = Math.floor(ms / 1000);
-  const hh = String(Math.floor(s / 3600)).padStart(2, "0");
-  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
-  const ss = String(s % 60).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
-}
-
-// ============ ЖИЗНЕННЫЙ ЦИКЛ ИГРОКА ============
-
-API.on("player_join", (player) => {
-  const id = state.nextId++;
-  const data = {
-    uuid: player.uuid,
-    nickname: player.nickname,
-    roomId: id,
-    alive: true,
-    coins: 0,
-    kills: 0,
-    isAdmin: id === 1,     // первому — админ
-    status: { name: "", color: "" },
-    ownedStatuses: [],
-    cooldowns: {},
-    isFlying: id === 1,
-  };
-  state.players.set(player.uuid, data);
-
-  // Первому — админ: полёт, все оружия, бесконечные
-  if (data.isAdmin) {
-    giveAdminKit(player);
+  // Обработка команд
+  if (message.startsWith("/")) {
+    const [command, ...params] = message.substring(1).split(" ");
+    const commandHandler = commandHandlers[command.toLowerCase()];
+    if (commandHandler) {
+      commandHandler(player, playerData, params);
+      return false; // Предотвращаем отправку сообщения в чат
+    }
   }
 
-  // HUD
-  attachHud(player, data);
-  updateAllHud();
-});
+  // Обновляем HUD, если что-то изменилось (например, монеты)
+  updatePlayerHud(player);
 
-API.on("player_leave", (player) => {
-  const data = state.players.get(player.uuid);
-  if (data) {
-    data.alive = false;
-    // ID оставляем занятым, чтобы не путать
-  }
-  updateAllHud();
-});
+  // Возвращаем true, чтобы сообщение отправилось в чат
+  return true;
+};
 
-API.on("player_death", (killer, victim) => {
-  const kd = getPlayerData(killer);
-  if (kd) { kd.kills++; updateAllHud(); }
-});
+// --- Инициализация ---
 
-// ============ АДМИНСКИЙ НАБОР ============
-
-function giveAdminKit(player) {
-  API.giveAllWeapons(player, { infinite: true });      // все оружия беск
-  API.giveAllBuildingBlocks(player, { infinite: true });
-  API.setFlight(player, true);
-  player.showHint("👑 Вы АДМИН!");
+function initializeServer() {
+  API.getAllPlayers().forEach(player => {
+    API.onPlayerJoin(player); // Обрабатываем каждого уже подключенного игрока
+  });
+  setInterval(updateScoreboard, 5000); // Обновляем таблицу лидеров каждые 5 секунд
 }
 
-// ============ ЗОНЫ ============
+// --- Команды ---
 
-API.on("zone_enter", (player, zone) => {
-  const data = getPlayerData(player);
-  if (!data) return;
+const commandHandlers = {
+  // --- Основные команды ---
+  "spawn": handleSpawnCommand,
+  "tp": handleTpCommand,
+  "pay": handlePayCommand,
+  "confirmpay": handleConfirmPayCommand,
+  "status": handleStatusCommand,
+  "give": handleGiveCommand,
+  "fly": handleFlyCommand,
+  "heal": handleHealCommand,
+  "weapon": handleWeaponCommand,
+  "reload": handleReloadCommand,
+  "pop": handlePopCommand,
+  "ban": handleBanCommand,
+  "admin": handleAdminCommand,
+  // Добавьте другие команды здесь
+};
 
-  const tag = (zone.tag || "").toLowerCase();
-  const name = zone.name || "";
+function handleTpCommand(player, playerData, params) {
+  if (!playerData.alive) { player.sendMessage("Вы мертвы."); return; }
+  if (params.length === 0) { player.sendMessage("Используйте: /tp <ID>"); return; }
 
-  switch (tag) {
-    case "farm":      handleFarm(player, data, name, zone); break;
-    case "weapon":    handleWeapon(player, data, name);     break;
-    case "xp":        handleHp(player, data, name);         break;
-    case "hint":      player.showHint(name);                break;
-    case "tp":        handleTp(player, name);               break;
-    case "status":    handleStatusBuy(player, data, name);  break;
-    case "status2":   handleStatusDoor(player, data, name); break;
-    case "plata1":    player.showHint("Введите /pay <ID> <сумма>"); break;
-    case "plata2":    player.showHint("Введите /payid <ID> затем /pay"); break;
-    case "plata3":    player.showHint("Подтвердите /confirmpay"); break;
-  }
-});
+  const targetId = parseInt(params[0], 10);
+  const targetData = getPlayerDataById(targetId);
 
-// ----- FARM -----
-function handleFarm(player, data, name, zone) {
-  const amount = parseInt(name, 10);
-  if (isNaN(amount)) return;
+  if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+  if (!targetData.alive) { player.sendMessage(`Игрок ${targetData.nickname} не в игре.`); return; }
 
-  const key = "farm_" + zone.id;
-  const now = Date.now();
-  if (data.cooldowns[key] && now - data.cooldowns[key] < 2000) return;
-  data.cooldowns[key] = now;
-
-  data.coins += amount;
-  player.showHint(`+${amount} монет (Всего: ${data.coins})`);
-  updateAllHud();
+  API.teleport(player, targetData.player.position);
+  player.sendMessage(`Вы телепортировались к игроку ${targetData.nickname} (#${targetId}).`);
 }
 
-// ----- WEAPON -----
-// "0@100" — слот@цена
-function handleWeapon(player, data, name) {
-  const [slotStr, priceStr] = name.split("@");
-  const slot = parseInt(slotStr, 10);
-  const price = parseInt(priceStr, 10);
-  if (isNaN(slot) || isNaN(price)) return;
+function handleSpawnCommand(player, playerData, params) {
+  if (!playerData.alive) { player.sendMessage("Вы мертвы."); return; }
 
-  if (data.coins < price) {
-    player.showHint("❌ Недостаточно средств");
+  const targetIdParam = params[0];
+  if (!targetIdParam) {
+    API.teleport(player, API.getSpawnPoint());
+    if (playerData.isFlying) {
+      playerData.isFlying = false;
+      API.setFlight(player, false);
+    }
+    player.sendMessage("Вы вернулись на спавн.");
+  } else if (playerData.isAdmin) {
+    const targetId = parseInt(targetIdParam, 10);
+    const targetData = getPlayerDataById(targetId);
+    if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+
+    API.teleport(targetData.player, API.getSpawnPoint());
+    if (targetData.isFlying) {
+      targetData.isFlying = false;
+      API.setFlight(targetData.player, false);
+    }
+    player.sendMessage(`Игрок ${targetData.nickname} (#${targetId}) отправлен на спавн.`);
+  } else {
+    player.sendMessage("Только админы могут телепортировать других.");
+  }
+}
+
+function handlePopCommand(player, playerData, params) {
+  if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+  if (params.length === 0) { player.sendMessage("Используйте: /pop <текст>"); return; }
+  const message = params.join(" ");
+  API.getAllPlayers().forEach(p => {
+    const pData = getPlayerDataByUuid(p.uuid);
+    if (pData && pData.alive) {
+      p.showHint(`<color=#FFA500><b>[Внимание]</b></color> ${message}`);
+    }
+  });
+}
+
+function handleAdminCommand(player, playerData, params) {
+  if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+  if (params.length === 0) { player.sendMessage("Используйте: /admin <ID>"); return; }
+
+  const targetId = parseInt(params[0], 10);
+  const targetData = getPlayerDataById(targetId);
+
+  if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+
+  if (targetData.isAdmin) {
+    revokeAdminPrivileges(targetData.player, targetData);
+    player.sendMessage(`Админка у игрока ${targetData.nickname} (#${targetId}) отозвана.`);
+  } else {
+    grantAdminPrivileges(targetData.player, targetData);
+    player.sendMessage(`Админка выдана игроку ${targetData.nickname} (#${targetId}).`);
+  }
+  updateScoreboard();
+}
+
+function handleBanCommand(player, playerData, params) {
+  if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+  if (params.length === 0) { player.sendMessage("Используйте: /ban <ID> [причина]"); return; }
+
+  const targetId = parseInt(params[0], 10);
+  const targetData = getPlayerDataById(targetId);
+
+  if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+  if (targetData.isAdmin && !playerData.isAdmin) {
+     player.sendMessage("Вы не можете забанить другого админа."); return;
+  }
+
+  const reason = params.slice(1).join(" ") || "Причина не указана";
+  API.kick(targetData.player, `Забанен: ${reason}`);
+  targetData.alive = false;
+  targetData.isFlying = false;
+  API.setFlight(targetData.player, false);
+  player.sendMessage(`Игрок ${targetData.nickname} (#${targetId}) забанен. Причина: ${reason}`);
+  updateScoreboard();
+}
+
+function handlePayCommand(player, playerData, params) {
+  if (!playerData.alive) { player.sendMessage("Вы мертвы."); return; }
+  if (params.length < 2) { player.sendMessage("Используйте: /pay <ID> <сумма>"); return; }
+
+  const targetId = parseInt(params[0], 10);
+  const amount = parseInt(params[1], 10);
+
+  if (isNaN(targetId) || isNaN(amount) || amount <= 0) {
+    player.sendMessage("Неверный ID или сумма.");
     return;
   }
-  data.coins -= price;
-  giveWeaponBySlot(player, slot);
-  player.showHint(`Куплено оружие слота ${slot} за ${price}`);
-  updateAllHud();
+
+  const targetData = getPlayerDataById(targetId);
+  if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+  if (targetData.uuid === playerData.uuid) { player.sendMessage("Вы не можете переводить монеты самому себе."); return; }
+  if (playerData.coins < amount) { player.sendMessage(`Недостаточно ${amount} монет. У вас: ${playerData.coins}.`); return; }
+
+  pendingPayment = { from: playerData, to: targetData, amount: amount };
+  player.sendMessage(`Вы собираетесь перевести ${targetData.nickname} (#${targetId}) ${amount} монет. Подтвердите командой /confirmpay.`);
+  targetData.player.showHint(`Игрок #${playerData.roomId} хочет перевести вам ${amount} монет. Используйте /confirmpay для подтверждения.`);
 }
 
-function giveWeaponBySlot(player, slot) {
-  const map = {
+function handleConfirmPayCommand(player, playerData, params) {
+  if (!pendingPayment) { player.sendMessage("Нет ожидающих платежей для подтверждения."); return; }
+  if (pendingPayment.to.uuid !== playerData.uuid) { player.sendMessage("Вы не являетесь получателем этого платежа."); return; }
+
+  const { from, to, amount } = pendingPayment;
+  const senderData = getPlayerDataByUuid(from.uuid);
+
+  if (!senderData || senderData.coins < amount) {
+    player.sendMessage(`Платеж не удался. У отправителя (${senderData?.nickname || 'игрок'}) недостаточно монет.`);
+    if (senderData && senderData.uuid !== playerData.uuid) {
+       senderData.player.showHint(`Ваш перевод (${amount} монет) не прошел, так как у вас недостаточно средств.`);
+    }
+    pendingPayment = null;
+    return;
+  }
+
+  senderData.coins -= amount;
+  to.coins += amount;
+
+  player.sendMessage(`Вы успешно перевели ${amount} монет ${to.nickname} (#${to.roomId}).`);
+  to.player.sendMessage(`Игрок ${senderData.nickname} (#${senderData.roomId}) перевел вам ${amount} монет.`);
+
+  updatePlayerHud(player);
+  updatePlayerHud(to.player);
+  updateScoreboard();
+  pendingPayment = null;
+}
+
+function handleGiveCommand(player, playerData, params) {
+  if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+  if (params.length < 3) { player.sendMessage("Используйте: /give <ID> <предмет> <кол-во>"); return; }
+
+  const targetId = parseInt(params[0], 10);
+  const itemName = params[1].toLowerCase();
+  const amount = parseInt(params[2], 10);
+
+  const targetData = getPlayerDataById(targetId);
+  if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+  if (isNaN(amount) || amount <= 0) { player.sendMessage("Неверное количество."); return; }
+
+  if (itemName === "coins" || itemName === "монеты") {
+    targetData.coins += amount;
+    player.sendMessage(`Вы выдали ${targetData.nickname} (#${targetId}) ${amount} монет.`);
+    targetData.player.showHint(`+${amount} монет от админа.`);
+    updatePlayerHud(targetData.player);
+    updateScoreboard();
+  } else {
+    const weapon = API.getWeaponByName(itemName);
+    if (weapon) {
+      API.giveWeapon(targetData.player, weapon, { amount: amount, infinite: false });
+      player.sendMessage(`Вы выдали ${targetData.nickname} (#${targetId}) ${itemName} x${amount}.`);
+    } else {
+      player.sendMessage(`Неизвестный предмет: ${itemName}.`);
+    }
+  }
+}
+
+function handleStatusCommand(player, playerData, params) {
+  if (params.length === 0) {
+    player.sendMessage(`Ваш текущий статус: ${playerData.status.name || 'Нет'}`);
+    player.sendMessage(`Купленные статусы: ${playerData.ownedStatuses.join(', ') || 'Нет'}`);
+    return;
+  }
+
+  const statusColor = params[0];
+  const statusName = params[1];
+
+  if (playerData.isAdmin) {
+    setPlayerStatus(playerData, statusName, statusColor);
+    player.sendMessage(`Статус "${statusName}" установлен.`);
+  } else {
+    player.sendMessage("Для покупки статуса используйте зоны или админские команды.");
+  }
+}
+
+function handleFlyCommand(player, playerData, params) {
+  if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+
+  let targetPlayer = player;
+  let targetData = playerData;
+  let enableFlight = !playerData.isFlying;
+
+  if (params.length > 0) {
+    const targetId = parseInt(params[0], 10);
+    if (!isNaN(targetId)) {
+      const foundData = getPlayerDataById(targetId);
+      if (foundData) {
+        targetPlayer = foundData.player;
+        targetData = foundData;
+      } else {
+        player.sendMessage(`Игрок с ID ${targetId} не найден.`);
+        return;
+      }
+    }
+    if (isNaN(targetId)) {
+      const stateStr = params[0].toLowerCase();
+      if (stateStr === "true" || stateStr === "on" || stateStr === "вкл") enableFlight = true;
+      else if (stateStr === "false" || stateStr === "off" || stateStr === "выкл") enableFlight = false;
+      else { player.sendMessage("Используйте: /fly [ID] [true/false]"); return; }
+    } else {
+       if (params.length > 1) {
+         const stateStr = params[1].toLowerCase();
+         if (stateStr === "true" || stateStr === "on" || stateStr === "вкл") enableFlight = true;
+         else if (stateStr === "false" || stateStr === "off" || stateStr === "выкл") enableFlight = false;
+         else { player.sendMessage("Используйте: /fly [ID] [true/false]"); return; }
+       } else {
+         enableFlight = !targetData.isFlying;
+       }
+    }
+  }
+
+  targetData.isFlying = enableFlight;
+  API.setFlight(targetPlayer, enableFlight);
+  player.sendMessage(`Полет для ${targetData.nickname} ${enableFlight ? 'включен' : 'выключен'}.`);
+  if (targetData.uuid !== playerData.uuid) {
+     targetPlayer.showHint(enableFlight ? "Админ включил вам полет!" : "Админ выключил вам полет.");
+  }
+}
+
+function handleHealCommand(player, playerData, params) {
+   if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+   if (params.length < 2) { player.sendMessage("Используйте: /heal <ID> <HP>"); return; }
+
+   const targetId = parseInt(params[0], 10);
+   const healAmount = parseInt(params[1], 10);
+
+   const targetData = getPlayerDataById(targetId);
+   if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+   if (isNaN(healAmount) || healAmount <= 0) { player.sendMessage("Неверное количество HP."); return; }
+
+   const currentHealth = API.getHealth(targetData.player);
+   const maxHealth = 100;
+   const newHealth = Math.min(currentHealth + healAmount, maxHealth);
+   API.setHealth(targetData.player, newHealth);
+
+   player.sendMessage(`Вылечили ${targetData.nickname} (#${targetId}) на ${newHealth - currentHealth} HP (всего ${newHealth}).`);
+   targetData.player.showHint(`Вас вылечили на ${newHealth - currentHealth} HP.`);
+}
+
+function handleWeaponCommand(player, playerData, params) {
+  if (!playerData.isAdmin) { player.sendMessage("Только для админов."); return; }
+  if (params.length < 2) { player.sendMessage("Используйте: /weapon <ID> <слот> [infinite]"); return; }
+
+  const targetId = parseInt(params[0], 10);
+  const slot = parseInt(params[1], 10);
+  const infinite = params.length > 2 && (params[2].toLowerCase() === "true" || params[2].toLowerCase() === "infinite");
+
+  const targetData = getPlayerDataById(targetId);
+  if (!targetData) { player.sendMessage(`Игрок с ID ${targetId} не найден.`); return; }
+  if (isNaN(slot)) { player.sendMessage("Неверный слот."); return; }
+
+  giveWeaponBySlot(targetData.player, slot, false);
+  player.sendMessage(`Вы выдали игроку ${targetData.nickname} (#${targetId}) оружие слота ${slot} ${infinite ? '(бесконечное)' : ''}.`);
+}
+
+function handleReloadCommand(player, playerData) {
+  updatePlayerHud(player);
+  player.sendMessage("HUD обновлен.");
+}
+
+function giveWeaponBySlot(player, slot, isPurchase) {
+  const weapons = {
     0: { item: "main",       infinite: false },
     1: { item: "secondary",  infinite: false },
     2: { item: "melee",      infinite: false },
@@ -156,207 +503,38 @@ function giveWeaponBySlot(player, slot) {
     7: { item: "grenade",    infinite: true  },
     8: { item: "blocks",     infinite: true  },
   };
-  const c = map[slot];
-  if (c) API.giveWeapon(player, c.item, { infinite: c.infinite });
-}
 
-// ----- HP -----
-// "100@500" — hp@цена
-function handleHp(player, data, name) {
-  const [hpStr, priceStr] = name.split("@");
-  const hp = parseInt(hpStr, 10);
-  const price = parseInt(priceStr, 10);
-  if (isNaN(hp) || isNaN(price)) return;
+  const weaponInfo = weapons[slot];
+  if (!weaponInfo) {
+    player.showHint("Неверный слот оружия.");
+    return;
+  }
 
-  if (data.coins < price) { player.showHint("❌ Недостаточно средств"); return; }
-  data.coins -= price;
-  API.setHealth(player, hp);
-  player.showHint(`+${hp} HP за ${price}`);
-  updateAllHud();
-}
-
-// ----- TP -----
-// "10@20@30"
-function handleTp(player, name) {
-  const [x, y, z] = name.split("@").map(Number);
-  if ([x,y,z].some(isNaN)) return;
-  API.teleport(player, { x, y, z });
-}
-
-// ----- STATUS BUY -----
-// "red@vip@100"
-function handleStatusBuy(player, data, name) {
-  const parts = name.split("@");
-  if (parts.length < 2) return;
-  const color = parts[0];
-  const statusName = parts[1];
-  const price = parts.length >= 3 ? parseInt(parts[2], 10) || 0 : 0;
-
-  if (data.ownedStatuses.includes(statusName)) return;
-  if (data.coins < price) { player.showHint("❌ Недостаточно средств"); return; }
-
-  data.coins -= price;
-  data.ownedStatuses.push(statusName);
-  data.status = { name: statusName, color };
-  player.showHint(`✅ Статус ${statusName} куплен!`);
-  updateAllHud();
-}
-
-// ----- STATUS DOOR -----
-// "red@vip" — только с vip
-function handleStatusDoor(player, data, name) {
-  const parts = name.split("@");
-  if (parts.length < 2) return;
-  const required = parts[1];
-  if (!data.ownedStatuses.includes(required)) {
-    API.teleport(player, API.getSpawnPoint());
-    player.showHint(`🔒 Нужен статус: ${required}`);
+  const weaponName = weaponInfo.item;
+  try {
+    API.giveWeapon(player, weaponName, { infinite: weaponInfo.infinite });
+    if (isPurchase) {
+    } else if (getPlayerDataByUuid(player.uuid)?.isAdmin) {
+       player.showHint(`Выдано оружие: ${weaponName} (${weaponInfo.infinite ? 'беск.' : 'обычн.'})`);
+    }
+  } catch (e) {
+     console.error(`Ошибка выдачи оружия ${weaponName}:`, e);
+     player.showHint("Ошибка при выдаче оружия.");
   }
 }
 
-// ============ ЧАТ-КОМАНДЫ ============
-
-API.on("chat", (player, text) => {
-  if (!text.startsWith("/")) return;
-  const data = getPlayerData(player);
-  if (!data) return;
-
-  const args = text.trim().split(/\s+/);
-  const cmd = args[0].toLowerCase();
-
-  switch (cmd) {
-    case "/help":
-      player.sendMessage([
-        "/tp <ID> — телепорт к игроку",
-        "/spawn <ID> — на спавн",
-        "/pop <текст> — сообщение всем",
-        "/adm <ID> — выдать админку (админ)",
-        "/ban <ID> — кик/бан (админ)",
-        "/pay <ID> <сумма> — перевод",
-        "/myid — мой ID",
-      ].join("\n"));
-      break;
-
-    case "/myid":
-      player.sendMessage(`Ваш ID: ${data.roomId}`);
-      break;
-
-    case "/tp": {
-      const id = parseInt(args[1], 10);
-      const target = getPlayerById(id);
-      if (!target) { player.sendMessage("Игрок не найден"); return; }
-      API.teleport(player, target.position);
-      player.sendMessage(`ТП к #${id}`);
-      break;
-    }
-
-    case "/spawn": {
-      const id = parseInt(args[1], 10);
-      if (data.roomId === id) {
-        API.teleport(player, API.getSpawnPoint());
-      } else if (data.isAdmin) {
-        const t = getPlayerById(id);
-        if (t) API.teleport(t.player, API.getSpawnPoint());
-      }
-      break;
-    }
-
-    case "/pop": {
-      const msg = text.substring(4).trim();
-      API.getAllPlayers().forEach(p => p.showHint(msg));
-      break;
-    }
-
-    case "/adm": {
-      if (!data.isAdmin) { player.sendMessage("🚫 Только админ"); return; }
-      const t = getPlayerById(parseInt(args[1], 10));
-      if (t && !t.isAdmin) {
-        t.isAdmin = true;
-        API.sendMessage(t.player, "Вам выдана админка");
-        giveAdminKit(t.player);
-      }
-      break;
-    }
-
-    case "/ban": {
-      if (!data.isAdmin) { player.sendMessage("🚫 Только админ"); return; }
-      const t = getPlayerById(parseInt(args[1], 10));
-      if (t) {
-        t.alive = false;
-        API.kick(t.player, "Забанен админом");
-        updateAllHud();
-      }
-      break;
-    }
-
-    case "/pay": {
-      const id = parseInt(args[1], 10);
-      const amt = parseInt(args[2], 10);
-      if (isNaN(id) || isNaN(amt) || amt <= 0) return;
-      if (data.coins < amt) { player.showHint("❌ Недостаточно средств"); return; }
-      const t = getPlayerById(id);
-      if (!t) { player.showHint("Игрок не найден"); return; }
-      data.coins -= amt;
-      t.coins += amt;
-      API.sendMessage(t.player, `💰 Вам переведено ${amt} от #${data.roomId}`);
-      player.showHint(`Переведено ${amt} игроку #${id}`);
-      updateAllHud();
-      break;
-    }
-
-    case "/giveall": {
-      if (!data.isAdmin) return;
-      giveAdminKit(player);
-      player.showHint("Всё выдано");
-      break;
-    }
-  }
-});
-
-// ============ HUD ============
-
-function attachHud(player, data) {
-  // Левый верх + правый верх + таблица
+function setupPlayerHud(player, playerData) {
   API.setTopLeft(player, "");
   API.setTopRight(player, "");
   API.setScoreboard(player, "");
 }
 
-function updateAllHud() {
-  const time = fmtTime(Date.now() - state.serverStart);
+// --- Главная функция запуска ---
+// API.onServerStart = initializeServer; // Раскомментируйте, если скрипт запускается при старте сервера
+// initializeServer(); // Или вызовите вручную, если скрипт подключается динамически
 
-  // Радужная надпись меняется раз в 20 сек
-  state.hintToggle = (Math.floor((Date.now() - state.serverStart) / 20000) % 2) === 1;
-  const leftText = state.hintToggle
-    ? "<b>/help - тут все команды, долбоёбы!</b>"
-    : "<b>режим от тяночки!</b>";
-  const color = RAINBOW[state.rainbowIndex % RAINBOW.length];
+// Примерный вызов при подключении плагина (если API поддерживает)
+// API.onPluginLoad = initializeServer;
 
-  // Заголовки таблицы по правкам:
-  // статусы / рум айди / монеты / убийства
-  const rows = [...state.players.values()]
-    .filter(p => p.alive)
-    .sort((a, b) => a.roomId - b.roomId)
-    .map(p =>
-      `${p.roomId} | ${p.nickname} | ${p.status.name || "-"} | ${p.roomId} | ${p.coins} | ${p.kills}`
-    );
-
-  const table = [
-    "статусы | рум айди | монеты | убийства",
-    ...rows
-  ].join("\n");
-
-  API.getAllPlayers().forEach(p => {
-    API.setTopLeft(p, `<color=${color}>${leftText}</color>`);
-    API.setTopRight(p, `Server Time\n${time}`);
-    API.setScoreboard(p, table);
-  });
-
-  state.rainbowIndex++;
-}
-
-// ============ ТИКЕР ============
-
-setInterval(() => {
-  updateAllHud();
-}, 1000);
+// Вызов для тестирования
+initializeServer();

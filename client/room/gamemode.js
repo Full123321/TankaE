@@ -66,7 +66,7 @@ function updatePlayer(player, playerData) {
   playerData.player = player;
   playerData.roomId = player.id;
   playerData.nickname = player.name;
-  playerData.alive = player.isConnected && API.isPlayerAlive(player); // Проверяем, что игрок подключен и жив
+  playerData.alive = player.isConnected && API.isPlayerAlive(player);
   playerData.isFlying = API.isPlayerFlying(player);
   updatePlayerHud(player);
 }
@@ -81,13 +81,13 @@ function setPlayerStatus(playerData, statusName, statusColor) {
 
 function grantAdminPrivileges(player, playerData) {
   playerData.isAdmin = true;
-  API.setPlayerTeam(player, API.getTeamByName("Admin")); // Предполагается, что есть команда "Admin"
+  API.setPlayerTeam(player, API.getTeamByName("Admin"));
   player.showHint("Вам выданы права администратора.");
 }
 
 function revokeAdminPrivileges(player, playerData) {
   playerData.isAdmin = false;
-  API.setPlayerTeam(player, API.getTeamByName("Default")); // Предполагается, что есть команда "Default"
+  API.setPlayerTeam(player, API.getTeamByName("Default"));
   if (playerData.isFlying) {
     API.setFlight(player, false);
     playerData.isFlying = false;
@@ -105,7 +105,7 @@ API.onPlayerJoin = (player) => {
       player: player,
       roomId: player.id,
       nickname: player.name,
-      coins: 100, // Начальное количество монет
+      coins: 100,
       isAdmin: false,
       alive: true,
       isFlying: false,
@@ -113,7 +113,6 @@ API.onPlayerJoin = (player) => {
       ownedStatuses: [],
     };
   } else {
-    // Игрок вернулся, восстанавливаем данные
     players[uuid].player = player;
     players[uuid].roomId = player.id;
     players[uuid].nickname = player.name;
@@ -125,19 +124,13 @@ API.onPlayerJoin = (player) => {
   setupPlayerHud(player, playerData);
   updatePlayerHud(player);
   updateScoreboard();
-
-  // Если игрок присоединился, и мы хотим, чтобы он снова стал админом, если был
-  // if (playerData.isAdmin) {
-  //   grantAdminPrivileges(player, playerData);
-  // }
 };
 
 API.onPlayerLeave = (player) => {
   const playerData = getPlayerDataByUuid(player.uuid);
   if (playerData) {
     playerData.alive = false;
-    playerData.player = null; // Очищаем ссылку на объект игрока
-    // Не удаляем данные игрока, чтобы сохранить прогресс
+    playerData.player = null;
   }
   updateScoreboard();
 };
@@ -146,7 +139,7 @@ API.onPlayerSpawn = (player) => {
   const playerData = getPlayerDataByUuid(player.uuid);
   if (playerData) {
     playerData.alive = true;
-    playerData.isFlying = false; // Сбрасываем полет при спавне
+    playerData.isFlying = false;
     API.setFlight(player, false);
     updatePlayerHud(player);
     updateScoreboard();
@@ -155,35 +148,30 @@ API.onPlayerSpawn = (player) => {
 
 API.onPlayerDamage = (player, attacker, damage, type) => {
   const playerData = getPlayerDataByUuid(player.uuid);
-  if (playerData && !playerData.alive) return; // Игрок уже мертв
+  if (playerData && !playerData.alive) return;
 
-  if (!attacker) { // Смерть от окружения
+  if (!attacker) {
     if (playerData) {
       playerData.alive = false;
-      API.setHealth(player, 0); // Убедимся, что он мертв
-      // Не обновляем HUD, так как игрок мертв
+      API.setHealth(player, 0);
     }
   }
 };
 
 API.onPlayerChat = (player, message) => {
   const playerData = getPlayerDataByUuid(player.uuid);
-  if (!playerData || !playerData.alive) return false; // Игнорируем мертвых
+  if (!playerData || !playerData.alive) return false;
 
-  // Обработка команд
   if (message.startsWith("/")) {
     const [command, ...params] = message.substring(1).split(" ");
     const commandHandler = commandHandlers[command.toLowerCase()];
     if (commandHandler) {
       commandHandler(player, playerData, params);
-      return false; // Предотвращаем отправку сообщения в чат
+      return false;
     }
   }
 
-  // Обновляем HUD, если что-то изменилось (например, монеты)
   updatePlayerHud(player);
-
-  // Возвращаем true, чтобы сообщение отправилось в чат
   return true;
 };
 
@@ -191,15 +179,14 @@ API.onPlayerChat = (player, message) => {
 
 function initializeServer() {
   API.getAllPlayers().forEach(player => {
-    API.onPlayerJoin(player); // Обрабатываем каждого уже подключенного игрока
+    API.onPlayerJoin(player);
   });
-  setInterval(updateScoreboard, 5000); // Обновляем таблицу лидеров каждые 5 секунд
+  setInterval(updateScoreboard, 5000);
 }
 
 // --- Команды ---
 
 const commandHandlers = {
-  // --- Основные команды ---
   "spawn": handleSpawnCommand,
   "tp": handleTpCommand,
   "pay": handlePayCommand,
@@ -213,7 +200,6 @@ const commandHandlers = {
   "pop": handlePopCommand,
   "ban": handleBanCommand,
   "admin": handleAdminCommand,
-  // Добавьте другие команды здесь
 };
 
 function handleTpCommand(player, playerData, params) {
@@ -529,12 +515,4 @@ function setupPlayerHud(player, playerData) {
   API.setScoreboard(player, "");
 }
 
-// --- Главная функция запуска ---
-// API.onServerStart = initializeServer; // Раскомментируйте, если скрипт запускается при старте сервера
-// initializeServer(); // Или вызовите вручную, если скрипт подключается динамически
-
-// Примерный вызов при подключении плагина (если API поддерживает)
-// API.onPluginLoad = initializeServer;
-
-// Вызов для тестирования
 initializeServer();
